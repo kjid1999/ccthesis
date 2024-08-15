@@ -15,7 +15,6 @@ sys.path.append('.')
 
 import torch.nn as nn
 import torch.nn.functional as F
-# from info_nce import InfoNCE, info_nce
 
 from .utils.nn import mean_flat
 from .utils.losses import normal_kl, discretized_gaussian_log_likelihood
@@ -205,7 +204,6 @@ class GaussianDiffusion:
         self.model_variance = th.from_numpy(self.model_variance).to(device=device)
 
         ### I modified ###
-        # self.importance_estimate_model, self.tokenizer = get_importance_estimate_model()
         self._lambda = _lambda
         self.argsort_idx = freq_rank()
         self.batch_sum_appear = 0
@@ -469,16 +467,7 @@ class GaussianDiffusion:
                 self.num_timesteps, 
                 0
             ) # I modified
-            # %%%%%%%% another another try %%%%%%%% definitely wrong
-            # w0_t_1 = calculate_mask_rate(
-            #     th.zeros(sample.shape[:2], device=sample.device), 
-            #     t-1, 
-            #     self.num_timesteps, 
-            #     0
-            # )
-            # mask_rate -= w0_t_1
-            # mask_rate /= 1 - w0_t_1
-            # %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
             # print('p_sample in solver?', mask_rate.shape) # NO
             # random_mask = mask_rate[:,:,0].bernoulli()[..., None] # orgin
             random_mask = mask_rate.bernoulli()[..., None] # I modified
@@ -552,46 +541,8 @@ class GaussianDiffusion:
         """
 
         word_freq = th.load(f'./word_freq/bert-base-uncased_qqp_nocount_special.pt').cuda()
-        @th.no_grad()
-        def EF_criterion(cands_indices, t1, t2, T, word_freq=word_freq):
-            # len:(t1+1), T-t2
-            
-            non_MASK = (cands_indices != 103)
-            non_MASK_avg_appear = (word_freq[cands_indices] * non_MASK).squeeze().sum(dim=-1) / non_MASK.sum(dim=(-2, -1))
-            fac = th.cat([th.full((self.max_T-t2,), 1/(self.max_T-t2)), th.full((t1+1,), -1/(t1+1))])
-            
-            cri = fac[None] @ non_MASK_avg_appear
-
-            return (cri > 0).squeeze()
-
-        @th.no_grad()
-        def EF_criterion2(cands_indices, word_freq=word_freq.cuda()):
-            # len:(t1+1), T-t2
-            # cands_indices:(T, B, L)
-            
-            non_MASK = (cands_indices != 103)
-            non_MASK_sum_appear = (word_freq[cands_indices] * non_MASK).sum(dim=(1, 2, 3)) 
-            non_MASK_sum = non_MASK.sum(dim=(1, 2, 3))
-
-            return non_MASK_sum_appear, non_MASK_sum
 
         final = {'x0':[], 'xt':[], 'sample_without_mask':[]} if collect_every_step else []
-        # for sample in self.p_sample_loop_progressive(
-        #     model,
-        #     shape,
-        #     noise=noise,
-        #     clip_denoised=clip_denoised,
-        #     denoised_fn=denoised_fn,
-        #     model_kwargs=model_kwargs,
-        #     device=device,
-        #     progress=progress,
-        #     top_p=top_p,
-        #     clamp_step=clamp_step,
-        #     clamp_first=clamp_first,
-        #     mask=mask,
-        #     x_start=x_start
-        # ):
-        #     final.append(sample['sample'])
 
         # model.lm_head.weight[103] = model.mean_embed # same meaning as next line
         # model.word_embedding.weight[103] = model.mean_embed
@@ -627,26 +578,10 @@ class GaussianDiffusion:
                 final['xt'].append(sample['sample'])
                 final['sample_without_mask'].append(sample['sample_without_mask'])
 
-                # print(sample.keys())
-                # ['sample', 'pred_xstart', 'greedy_mean', 'out', 'last_tokens']
-
-                # exit()
-                # quick return for debug
-                # if len(final['x0']) == 10:
-                #     return final
             else:
                 final = sample['sample']
-
-                # collect sample to feed into criterion
-                # if not (t1 < self.max_T-T_t < t2):
-                #     with th.no_grad():
-                #         logits = model.get_logits(final, 0).to('cpu') # bsz, seqlen, vocab
-                #         cands_indices = th.topk(logits, k=1, dim=-1).indices
-                #         sample_to_feed_into_criterion.append(cands_indices)
                 
                 # collect sample to feed into criterion, for every t
-
-
                 if check_EF:
                     self.temp3.append(final)
                     with th.no_grad():
@@ -694,21 +629,6 @@ class GaussianDiffusion:
             self.temp2 = th.cat((self.temp2, freqs[..., None]), dim=-1)
             th.save(self.temp.mean(dim=-1), 'EF_evid_dist0.pt')
             th.save(self.temp2.mean(dim=-1), 'EF_evid_freq0.pt')
-
-        # with open('EF_evid_dist_mask', 'a') as f:
-
-            # for T_or_F in EF_criterion(
-            #     th.stack(sample_to_feed_into_criterion), 
-            #     T=self.max_T,
-            #     t1=t1, t2=t2
-            # ):
-            #     print(T_or_F)
-            #     f.write(str(int(T_or_F.item()))+"\n")
-
-            # batch_sum_appear, batch_num = EF_criterion2(th.stack(sample_to_feed_into_criterion))
-            # self.batch_sum_appear += batch_sum_appear
-            # self.batch_num += batch_num
-            # 還缺了什麼
 
         return final
 
@@ -864,21 +784,6 @@ class GaussianDiffusion:
 
         # importance_score = importance(input_ids_x, target_mask, self.importance_estimate_model)
         entropy = H(input_ids_x.cpu(), target_mask)
-        # print(entropy)
-        # print(non_padding)
-        # exit()
-        # print(input_ids_x[0]) # srv + tgt + pad
-        # print(input_ids_mask[0]) # noise add on tgt+pad
-        # print(importance_score[0])
-        # print(target_mask[0].int())
-        # print(self.tokenizer.decode(input_ids_x[0]))
-        # print(self.tokenizer.decode(input_ids_x[0][(1-input_ids_mask[0]).bool()]))
-        # print(self.tokenizer.decode(input_ids_x[0][target_mask[0]]))
-        # print(self.tokenizer.decode(input_ids_x[0][(1-input_ids_mask).sum(dim=-1, keepdim=True)[0]]))
-        # print((1-input_ids_mask).sum(dim=-1)+1)
-        # print(importance_score.sum(dim=1)) # yes, is 1
-        # exit()
-        # print(importance_score)
         ##################
         
         std = _extract_into_tensor(self.sqrt_one_minus_alphas_cumprod,
