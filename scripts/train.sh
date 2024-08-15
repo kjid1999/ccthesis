@@ -10,7 +10,7 @@ CUDA_VISIBLE_DEVICES=0 python -m torch.distributed.launch --nproc_per_node=1 --m
 --delay_opt 1 \
 --microbatch 128 \
 --dataset qqp \
---data_dir /home/DiffuSeq/datasets/QQP \
+--data_dir datasets/QQP \
 --learned_mean_embed True \
 --denoise True \
 --vocab bert \
@@ -18,6 +18,5 @@ CUDA_VISIBLE_DEVICES=0 python -m torch.distributed.launch --nproc_per_node=1 --m
 --use_fp16 \
 --denoise_rate 0.5 \
 --schedule_sampler lossaware \
---notes maxlen98_lambda0_triplet \
+--notes maxlen98_lambda0_triplet_KL \
 --_lambda 0.0 \
-# --resume_checkpoint /home/myDiffuSeq/diffusion_models/diffuseq_qqp_h128_lr0.0001_t2000_sqrt_lossaware_seed102_importance-mean20240521-15:27:23/ema_0.9999_080000.pt

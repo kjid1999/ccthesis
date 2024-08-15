@@ -175,7 +175,9 @@ def main():
         sample_fn = (
             diffusion.p_sample_loop if not args.use_ddim else diffusion.ddim_sample_loop
         )
-        see_every_step = True
+
+        # see_every_step = True
+        see_every_step = False
         if see_every_step:
             print('THIS IS DEBUGGING MODE') 
         sample_shape = (x_start.shape[0], args.seq_len, args.hidden_dim)
@@ -203,45 +205,16 @@ def main():
 
         sample = samples # I modified
 
-        if see_every_step:
-            #### timesteps flat to batch ####
-            # t, bsz, seqlen, vocab -> bsz[i]: t, seqlen, vocab
-            sample_id = 1
-            mean_embed = model.mean_embed.to(sample[0].device)
-            mean_embed = mean_embed[None, :] + 0*sample[0][sample_id]
-            sample = th.stack(sample)[:, sample_id]
-            sample = th.cat((mean_embed[None], sample))
-            ###
-
         del samples # no help
         # sample = samples[-1] # original, 記憶體洩漏
 
         # print('decoding for seq2seq', )
         # print(sample.shape)
 
-        if see_every_step:
-            logits = model.cpu().get_logits(sample)
-        else:
-            logits = model.get_logits(sample).to('cpu')  # bsz, seqlen, vocab
+        logits = model.get_logits(sample).to('cpu')  # bsz, seqlen, vocab
+        
         del sample
         cands = th.topk(logits, k=1, dim=-1)
-
-##########
-        if see_every_step:
-            importance_estimate_model, _ = get_importance_estimate_model()
-            my_to_get_evidence(
-                sample_id,
-                cands,
-                input_ids_mask_ori,
-                args,
-                tokenizer,
-                input_ids_x,
-                world_size,
-                rank,
-                importance_estimate_model,
-                out_path='generation_outputs/every_step.json'
-            )
-            # auto exit here
 
         word_lst_recover = []
         word_lst_ref = []
@@ -268,62 +241,9 @@ def main():
                 fout.close()
             dist.barrier(device_ids=[int(os.environ["LOCAL_RANK"])])
 
+    # th.save(diffusion.batch_sum_appear / diffusion.batch_num, 'EF_evid.pt')
     print('### Total takes {:.2f}s .....'.format(time.time() - start_t))
     print(f'### Written the decoded output to {out_path}')
-
-def my_to_get_evidence(
-    sample_id,
-    cands,
-    input_ids_mask_ori,
-    args,
-    tokenizer,
-    input_ids_x,
-    world_size,
-    rank,
-    importance_estimate_model,
-    out_path
-    ):
-    from diffuseq.importance import importance
-
-    # importance_estimate_model = importance_estimate_model.to('cpu')
-
-    word_lst_recover = []
-    word_lst_ref = []
-    word_lst_source = []
-    importance_lst_recover = []
-
-    input_mask = input_ids_mask_ori[sample_id]
-    len_x = args.seq_len - sum(input_mask).tolist()
-
-    seq_input_ids_x = input_ids_x[sample_id]
-    source = tokenizer.decode_token(seq_input_ids_x[:len_x])
-    ref = tokenizer.decode_token(seq_input_ids_x[len_x:])
-
-    for seq in cands.indices:
-        suqeeze_seq = seq[len_x:].squeeze()[None].cuda()
-        importance_score = importance(suqeeze_seq, th.full(suqeeze_seq.shape, True, device=suqeeze_seq.device), importance_estimate_model, False)
-        importance_lst_recover.append(importance_score)
-        # exit()
-        tokens = tokenizer.decode_token(seq[len_x:])
-        word_lst_recover.append(tokens)
-
-        word_lst_source.append(source)
-        word_lst_ref.append(ref)
-
-        if len(word_lst_recover) >= 1500:
-            print(tokens)
-
-    for i in range(world_size):
-        if i == rank:  # Write files sequentially
-            fout = open(out_path, 'w')
-            for (recov, ref, src) in zip(word_lst_recover, word_lst_ref, word_lst_source):
-                print(json.dumps({"recover": recov, "reference": ref, "source": src}), file=fout)
-            fout.close()
-        dist.barrier(device_ids=[int(os.environ["LOCAL_RANK"])])
-
-    th.save(importance_lst_recover, 'importance_process.pt')
-    print('THIS IS DEBUGGING MODE') 
-    exit()
 
 if __name__ == "__main__":
     main()

@@ -8,7 +8,6 @@ import torch as th
 import torch.nn as nn
 import torch.nn.functional as F
 
-# from .hypernetwork import HyperNetwork, TargetLinear
 import copy
 
 from .utils.nn import (
@@ -59,7 +58,8 @@ class TransformerNetModel(nn.Module):
         self.hidden_size = config.hidden_size
 
         self.word_embedding = nn.Embedding(vocab_size, self.input_dims)
-        self.lm_head = nn.Linear(self.input_dims, vocab_size)
+        self.lm_head = nn.Linear(self.input_dims, vocab_size, bias=False)
+        # self.lm_head = nn.Linear(self.input_dims, vocab_size)
         with th.no_grad():
             self.lm_head.weight = self.word_embedding.weight
 
@@ -74,11 +74,6 @@ class TransformerNetModel(nn.Module):
             self.input_up_proj = nn.Sequential(nn.Linear(input_dims, config.hidden_size),
                                               nn.Tanh(), nn.Linear(config.hidden_size, config.hidden_size))
 
-        # hyper
-        # self.nothing_test = nn.Linear(config.hidden_size, config.hidden_size)
-        # self.tgt_L1 = TargetLinear(config.hidden_size, hyp_dim=1)
-        # self.tgt_L2 = TargetLinear(config.hidden_size, hyp_dim=1)
-        
         if init_pretrained == 'bert':
             print('initializing from pretrained bert...')
             print(config)
@@ -111,22 +106,45 @@ class TransformerNetModel(nn.Module):
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
 
         if self.output_dims != config.hidden_size:
-            self.output_down_proj = nn.Sequential(nn.Linear(config.hidden_size, config.hidden_size),
-                                                nn.Tanh(), nn.Linear(config.hidden_size, self.output_dims))
+            self.output_down_proj = nn.Sequential(
+                nn.Linear(config.hidden_size, config.hidden_size),
+                nn.Tanh(), 
+                nn.Linear(config.hidden_size, self.output_dims))
 
         if learned_mean_embed:
+            #### ori ####
             self.mean_embed = nn.Parameter(th.randn(input_dims))
             nn.init.normal_(self.mean_embed, mean=0, std=input_dims ** -0.5)
+            #############
+
+            # not practical, use @property below
+            # self.mean_embed = self.word_embedding.weight[103].cuda()
+            pass
         else:
             self.mean_embed = None
+    
+    # @property
+    # def mean_embed(self):
+    #     return self.word_embedding.weight[103]
 
     def get_embeds(self, input_ids):
         return self.word_embedding(input_ids)
 
-    def get_logits(self, hidden_repr):
-        if self.logits_mode == 1:
+    def get_logits(self, hidden_repr, logits_mode=1):
+        self.logits_mode = logits_mode
+        if self.logits_mode == 0:
+            # print('logits_mode=0')
+            hidden_repr_square = (hidden_repr**2).sum(dim=-1, keepdim=True)
+            inner_term = (-2*hidden_repr @ self.lm_head.weight.T) # 送GPU VRAM直接炸
+            lm_head_weight_square = (self.lm_head.weight**2).sum(dim=-1)[None, None]
+            dist_square = hidden_repr_square + inner_term + lm_head_weight_square 
+            # print('done logit', dist_square.max(), dist_square.min())
+            return - dist_square
+        elif self.logits_mode == 1:
+            # print('logits_mode=1')
             return self.lm_head(hidden_repr)
-        elif self.logits_mode == 2: # standard cosine similarity
+        elif self.logits_mode == 2: # standard cosine similarity <-不像
+            # print('logits_mode=2')
             text_emb = hidden_repr
             emb_norm = (self.lm_head.weight ** 2).sum(-1).view(-1, 1)  # vocab
             text_emb_t = th.transpose(text_emb.view(-1, text_emb.size(-1)), 0, 1)  # d, bsz*seqlen
@@ -137,6 +155,28 @@ class TransformerNetModel(nn.Module):
                                                                hidden_repr.size(1)) # vocab, bsz*seqlen
             scores = -scores.permute(1, 2, 0).contiguous()
             return scores
+        else:
+            raise NotImplementedError
+
+    def get_logits_fEF(self, hidden_repr, mask_idx, logits_mode=1):
+        self.logits_mode = logits_mode
+        lm_head_weight = self.lm_head.weight
+        lm_head_weight[mask_idx, :] = th.zeros((1, self.input_dims))
+
+        if self.logits_mode == 0:
+            # print('logits_mode=0')
+            hidden_repr_square = (hidden_repr**2).sum(dim=-1, keepdim=True)
+            inner_term = (-2*hidden_repr @ lm_head_weight.T)
+            lm_head_weight_square = (lm_head_weight**2).sum(dim=-1)[None, None]
+          
+            dist_square = hidden_repr_square + inner_term + lm_head_weight_square 
+            return - dist_square
+        elif self.logits_mode == 1:
+            # print('logits_mode=1')
+            # return self.lm_head(hidden_repr)
+            return hidden_repr @ lm_head_weight.T
+        elif self.logits_mode == 2:
+            raise NotImplementedError
         else:
             raise NotImplementedError
 
@@ -156,31 +196,6 @@ class TransformerNetModel(nn.Module):
         else:
             emb_x = x
 
-        # print(x.shape)
-        # print(emb_x.shape) # bs, len, hidden_size
-
-        # hyper
-            # print(self.mean_embed.shape)
-            # print(self.input_dims, self.hidden_size)
-            # print(x.shape)
-
-        # with torch.no_grad():
-            # hyp_mask = (x == self.mean_embed).all(dim=-1) # T or F (B, T, 1)
-            # hyp_mask = torch.stack((hyp_mask, ~hyp_mask), dim=-1)[..., None]
-            # hyp_mask = hyp_mask.type(emb_x.dtype)
-        # print('hyp_mask.shape', hyp_mask.shape)
-        # hyp_ipt = torch.tensor((-0.5, 0.5), dtype=emb_x.dtype)[:, None].cuda()
-        # emb_x = self.tgt_L1(emb_x, hyp_ipt, hyp_mask)
-        # print('emb_t', emb_t.dtype)
-        # print('emb_x', emb_x.dtype)
-        # print('hyp_mask', hyp_mask.dtype)
-        # exit()
-        # print('emb_x', emb_x.shape)
-        # emb_x = F.silu(emb_x)
-        # emb_x = self.tgt_L2(emb_x, hyp_ipt, hyp_mask)
-        # print('emb_x', emb_x.shape)
-        # emb_x = self.nothing_test(emb_x) # ok bsz=256 delay_opt=1
-
         seq_length = x.size(1)
         position_ids = self.position_ids[:, : seq_length ]
         emb_inputs = self.position_embeddings(position_ids) + emb_x + emb_t.unsqueeze(1).expand(-1, seq_length, -1)
@@ -192,8 +207,6 @@ class TransformerNetModel(nn.Module):
             h = self.output_down_proj(input_trans_hidden_states)
         else:
             h = input_trans_hidden_states
-        # print('input_trans_hidden_states', input_trans_hidden_states.dtype)
-        # print('emb_inputs', emb_inputs.dtype)
-        # print('h', h.dtype)
+
         h = h.type(x.dtype)
         return h

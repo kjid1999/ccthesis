@@ -20,6 +20,9 @@ import torch.nn.functional as F
 from .utils.nn import mean_flat
 from .utils.losses import normal_kl, discretized_gaussian_log_likelihood
 from .importance import importance, freq_rank, get_importance_estimate_model, calculate_mask_rate, H
+from .KL_approximation import _gaussian_extractor, D_var, D_prod
+
+word_freq = th.load(f'/home/myDiffuSeq/word_freq/bert-base-uncased_qqp_nocount_special.pt').numpy()
 
 def triplet_margin_loss(anchor, positive, negative, margin=1):
     '''
@@ -202,9 +205,15 @@ class GaussianDiffusion:
         self.model_variance = th.from_numpy(self.model_variance).to(device=device)
 
         ### I modified ###
-        self.importance_estimate_model, self.tokenizer = get_importance_estimate_model()
+        # self.importance_estimate_model, self.tokenizer = get_importance_estimate_model()
         self._lambda = _lambda
         self.argsort_idx = freq_rank()
+        self.batch_sum_appear = 0
+        self.batch_num = 0
+        self.temp = th.empty((2000, 0), device='cuda')
+        self.temp2 = th.empty((2000, 0), device='cuda')
+        self.temp3 = []
+        self.batch_cnt = 1
         ##################
 
     def training_losses(self, model, *args, **kwargs):
@@ -483,6 +492,7 @@ class GaussianDiffusion:
             
             mean_embed = model.mean_embed
             mean_embed_expand = mean_embed[None, None].expand(x_start.shape)
+            sample_without_mask = sample + 0
             sample = th.where(random_mask==0, sample, mean_embed_expand)
 
         if mask == None:
@@ -496,7 +506,8 @@ class GaussianDiffusion:
             "greedy_mean": out["mean"], 
             "out": out,
             "last_tokens": out["last_tokens"],
-            "masked_xstart": th.where(random_mask==0, out["pred_xstart"], mean_embed_expand)
+            "masked_xstart": th.where(random_mask==0, out["pred_xstart"], mean_embed_expand),
+            "sample_without_mask": sample_without_mask
         }
 
     
@@ -516,6 +527,7 @@ class GaussianDiffusion:
         mask=None,
         x_start=None,
         collect_every_step=False,
+        sth=True,
         **kwargs
     ):
         """
@@ -538,7 +550,32 @@ class GaussianDiffusion:
         :param progress: if True, show a tqdm progress bar.
         :return: a non-differentiable batch of samples.
         """
-        final = []
+
+        word_freq = th.load(f'./word_freq/bert-base-uncased_qqp_nocount_special.pt').cuda()
+        @th.no_grad()
+        def EF_criterion(cands_indices, t1, t2, T, word_freq=word_freq):
+            # len:(t1+1), T-t2
+            
+            non_MASK = (cands_indices != 103)
+            non_MASK_avg_appear = (word_freq[cands_indices] * non_MASK).squeeze().sum(dim=-1) / non_MASK.sum(dim=(-2, -1))
+            fac = th.cat([th.full((self.max_T-t2,), 1/(self.max_T-t2)), th.full((t1+1,), -1/(t1+1))])
+            
+            cri = fac[None] @ non_MASK_avg_appear
+
+            return (cri > 0).squeeze()
+
+        @th.no_grad()
+        def EF_criterion2(cands_indices, word_freq=word_freq.cuda()):
+            # len:(t1+1), T-t2
+            # cands_indices:(T, B, L)
+            
+            non_MASK = (cands_indices != 103)
+            non_MASK_sum_appear = (word_freq[cands_indices] * non_MASK).sum(dim=(1, 2, 3)) 
+            non_MASK_sum = non_MASK.sum(dim=(1, 2, 3))
+
+            return non_MASK_sum_appear, non_MASK_sum
+
+        final = {'x0':[], 'xt':[], 'sample_without_mask':[]} if collect_every_step else []
         # for sample in self.p_sample_loop_progressive(
         #     model,
         #     shape,
@@ -555,8 +592,14 @@ class GaussianDiffusion:
         #     x_start=x_start
         # ):
         #     final.append(sample['sample'])
-        from tqdm import tqdm
-        for sample in tqdm(self.p_sample_loop_progressive(
+
+        # model.lm_head.weight[103] = model.mean_embed # same meaning as next line
+        # model.word_embedding.weight[103] = model.mean_embed
+
+        # check_EF = True
+        check_EF = False
+
+        p_sample_loop_progressive_result = self.p_sample_loop_progressive(
             model,
             shape,
             noise=noise,
@@ -570,19 +613,103 @@ class GaussianDiffusion:
             clamp_first=clamp_first,
             mask=mask,
             x_start=x_start
-        ), total=self.max_T, position=1, leave=False):
+        )
+
+        sample_to_feed_into_criterion = []
+        dists = []
+        freqs = []
+        t1, t2 = 2, self.max_T-2
+
+        from tqdm import tqdm
+        for T_t, sample in enumerate(tqdm(p_sample_loop_progressive_result, total=self.max_T, position=1, leave=False), start=1):
             if collect_every_step:
-                final.append(sample['masked_xstart'].cpu())
+                final['x0'].append(sample['masked_xstart'].cpu())
+                final['xt'].append(sample['sample'])
+                final['sample_without_mask'].append(sample['sample_without_mask'])
 
                 # print(sample.keys())
                 # ['sample', 'pred_xstart', 'greedy_mean', 'out', 'last_tokens']
 
                 # exit()
                 # quick return for debug
-                # if len(final) == 10:
-                    # return final
+                # if len(final['x0']) == 10:
+                #     return final
             else:
                 final = sample['sample']
+
+                # collect sample to feed into criterion
+                # if not (t1 < self.max_T-T_t < t2):
+                #     with th.no_grad():
+                #         logits = model.get_logits(final, 0).to('cpu') # bsz, seqlen, vocab
+                #         cands_indices = th.topk(logits, k=1, dim=-1).indices
+                #         sample_to_feed_into_criterion.append(cands_indices)
+                
+                # collect sample to feed into criterion, for every t
+
+
+                if check_EF:
+                    self.temp3.append(final)
+                    with th.no_grad():
+                        # logits = model.get_logits(final, 0)#.to('cpu') # bsz, seqlen, vocab
+                        # cands_indices = th.topk(logits, k=1, dim=-1).indices
+                        # sample_to_feed_into_criterion.append(cands_indices)
+
+                        model.word_embedding.weight[103, :] = model.mean_embed
+                        logits = model.get_logits(final, 0)#.to('cpu') # bsz, seqlen, vocab
+                        argsort_idx = self.argsort_idx.tolist()
+                        argsort_idx.pop(103)
+                        argsort_idx = [103] + argsort_idx
+                        unlock_bound = (len(argsort_idx)*T_t) // self.max_T
+                        logits[..., argsort_idx[:unlock_bound]] = - float('inf')
+                        cands_indices = th.topk(logits, k=1, dim=-1).indices
+
+                        non_MASK = (cands_indices != 103).squeeze()
+                        non_MASK_sum_dist = ((final - model.mean_embed).norm(dim=-1) * non_MASK).sum(dim=(0, 1,)) 
+                        non_MASK_sum = non_MASK.sum(dim=(0, 1,))
+                        
+                        # dist = (final - model.mean_embed).norm(dim=-1).mean()
+                        dist = non_MASK_sum_dist / non_MASK_sum
+                        # print(word_freq[cands_indices.cpu()].shape, non_MASK.shape)
+                        non_MASK_sum_appear = (word_freq[cands_indices].squeeze() * non_MASK).sum(dim=(0, 1,)) 
+                        freq = non_MASK_sum_appear / non_MASK_sum
+
+                        # print(dist)
+                        # print(freq)
+
+                        # 可以連batchsize的平均都算 只要注意所有batch都一樣大
+                        dists.append(dist)
+                        freqs.append(freq)
+
+        if check_EF:
+            s = th.stack(self.temp3)
+            th.save(self.temp3, f'./decode_embs/batch{self.batch_cnt}.pt')
+            self.batch_cnt += 1
+            self.temp3 = []
+
+            # print(dists)
+            # print(freqs)
+            dists = th.stack(dists)
+            freqs = th.stack(freqs)
+            self.temp = th.cat((self.temp, dists[..., None]), dim=-1)
+            self.temp2 = th.cat((self.temp2, freqs[..., None]), dim=-1)
+            th.save(self.temp.mean(dim=-1), 'EF_evid_dist0.pt')
+            th.save(self.temp2.mean(dim=-1), 'EF_evid_freq0.pt')
+
+        # with open('EF_evid_dist_mask', 'a') as f:
+
+            # for T_or_F in EF_criterion(
+            #     th.stack(sample_to_feed_into_criterion), 
+            #     T=self.max_T,
+            #     t1=t1, t2=t2
+            # ):
+            #     print(T_or_F)
+            #     f.write(str(int(T_or_F.item()))+"\n")
+
+            # batch_sum_appear, batch_num = EF_criterion2(th.stack(sample_to_feed_into_criterion))
+            # self.batch_sum_appear += batch_sum_appear
+            # self.batch_num += batch_num
+            # 還缺了什麼
+
         return final
 
     def p_sample_loop_progressive(
@@ -630,7 +757,7 @@ class GaussianDiffusion:
 
         # I modified
         # initial masked record all masked, 1: masked, 0: non masked
-        self.masked_record = th.ones(sample_x.shape[:2], device=sample_x.device)
+        # self.masked_record = th.ones(sample_x.shape[:2], device=sample_x.device)
 
         for i in indices: # from T to 0
             t = th.tensor([i] * shape[0], device=device)
@@ -674,7 +801,7 @@ class GaussianDiffusion:
              x_start_mean + std * noise
         )
 
-    def _token_discrete_loss(self, x_t, get_logits, input_ids, mask=None, truncate=False, t=None):
+    def _token_discrete_loss(self, x_t, get_logits, input_ids, mask=None, truncate=False, t=None, temperature=1):
         '''
         the loss of -log p(w|z_0)
         :param x_start_mean: word embedding
@@ -683,7 +810,7 @@ class GaussianDiffusion:
         reshaped_x_t = x_t
         logits = get_logits(reshaped_x_t)  # bsz, seqlen, vocab
         loss_fct = th.nn.CrossEntropyLoss(reduction='none')
-        decoder_nll = loss_fct(logits.view(-1, logits.size(-1)), input_ids.view(-1)).view(input_ids.shape)
+        decoder_nll = loss_fct(logits.view(-1, logits.size(-1))/temperature, input_ids.view(-1)).view(input_ids.shape)
         if mask != None:
             decoder_nll *= mask
         if mask != None:
@@ -733,7 +860,7 @@ class GaussianDiffusion:
         # importance BERT should only attend on tgt to calculate importance
         non_padding = input_ids_x != 0
         target_mask = th.logical_and(input_ids_mask, non_padding)
-        # target_mask[(1-input_ids_mask).sum(dim=-1, keepdim=True)] = False
+        target_mask[(1-input_ids_mask).sum(dim=-1, keepdim=True)] = False
 
         # importance_score = importance(input_ids_x, target_mask, self.importance_estimate_model)
         entropy = H(input_ids_x.cpu(), target_mask)
@@ -777,20 +904,49 @@ class GaussianDiffusion:
         t0_loss = mean_flat((x_start_mean - model_out_x_start) ** 2)
         terms["mse"] = th.where(t0_mask, t0_loss, terms["mse"])
 
+        # I modified, add contrastive loss
         embedding_weight = model.model.module.word_embedding.weight[self.argsort_idx]
         rand_ga = th.randint(1, len(embedding_weight), size=(1,))[0]
         anchor = model.mean_embed.detach()
         pos = embedding_weight[:rand_ga]
         neg = embedding_weight[rand_ga:]
-        terms["contrastive"] = triplet_margin_loss(anchor, pos, neg, margin=1e-4)
+        terms["triplet"] = triplet_margin_loss(anchor, pos, neg, margin=1e-4)
+        terms["emb norm"] = (embedding_weight - anchor[None]).norm(dim=-1).mean()
+
+        # I modified, add KL approx regurization
+        posterior_mean, posterior_variance, log_posterior_variance = self.q_posterior_mean_variance(x_start, x_t, t)
+        reverse_mean, reverse_variance, log_reverse_variance = self.q_posterior_mean_variance(model_out_x_start, x_t, t)
+        q_mean = th.stack([model.mean_embed[None, None].expand(posterior_mean.shape), posterior_mean], dim=-2)
+        p_mean = th.stack([model.mean_embed[None, None].expand(reverse_mean.shape), reverse_mean], dim=-2)
+        small_var_shape = posterior_variance[:, :, 0].shape
+        small_var = th.full(small_var_shape, 1e-8, device=posterior_variance.device)
+        log_small_var = th.log(small_var)
+        q_var = th.stack([small_var, posterior_variance[:, :, 0]], dim=-1)
+        p_var = th.stack([small_var, reverse_variance[:, :, 0]], dim=-1)
+        q_log_var = th.stack([log_small_var, log_posterior_variance[:, :, 0]], dim=-1)
+        p_log_var = th.stack([log_small_var, log_reverse_variance[:, :, 0]], dim=-1)
+        b = t / self.max_T
+        q_weight = th.stack([b, 1-b], dim=-1)[:, None].expand(q_var.shape)
+        p_weight = q_weight
+        q = _gaussian_extractor(q_mean, q_var, q_weight, q_log_var)
+        p = _gaussian_extractor(p_mean, p_var, p_weight, p_log_var)
+        error_threshold = 1e-2
+        d_prod = D_prod(q, p)
+        d_var = D_var(q, p)
+        approx_active = (d_var - d_prod) < error_threshold
+        d_mean = ((d_var + d_prod)/2) * approx_active
+        terms["d_mean"] = d_mean.mean(dim=1).squeeze()
+        terms["d_act"] = approx_active.float().mean()
 
         out_mean, _, _ = self.q_mean_variance(x_start, th.LongTensor([self.num_timesteps - 1]).to(x_start.device))
         tT_loss =  mean_flat(out_mean ** 2)
 
-        decoder_nll = self._token_discrete_loss(x_start, get_logits, input_ids_x) # embedding regularization
+        decoder_nll = self._token_discrete_loss(x_start, get_logits, input_ids_x, temperature=1) # embedding regularization
         terms["nll"] = self._token_discrete_loss(model_out_x_start, get_logits, input_ids_x, mask=input_ids_mask, truncate=True, t=t) # x_0->model_out_x_start
 
-        terms["loss"] = terms["mse"] + decoder_nll + tT_loss + terms["contrastive"]
+        terms["loss"] = terms["mse"] + decoder_nll + tT_loss + terms["triplet"] + 1e-2*terms["emb norm"] + terms["d_mean"]
+        # terms["loss"] = terms["mse"] + decoder_nll + tT_loss + terms["d_mean"]
+        # terms["loss"] = terms["mse"] + decoder_nll + tT_loss
 
         if model.mean_embed is not None:
             terms["loss"] = terms["loss"] + self.reg_rate * model.mean_embed.norm(p=2).sum()
