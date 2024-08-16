@@ -52,12 +52,14 @@ def calculate_mask_rate(importance_score, t, num_timesteps, _lambda=0.5):
     t = t[..., None]
     return 1 - torch.clip(1 - t/T - _S(t, T, _lambda)*importance_score, 0, 1)
 
-word_appear = torch.load('/home/myDiffuSeq/word_freq/bert-base-uncased_qqp.pt')
+def get_word_freq():
+    return torch.load('./word_freq/bert-base-uncased_qqp_nocount_special.pt')
+
+word_appear = get_word_freq()
 sum_appear = sum(word_appear)
+
 @torch.no_grad()
 def H(input_ids, target_mask):
-    sen_len = target_mask.sum(dim=-1, keepdim=True)
-    
     entropy = - torch.log(word_appear[input_ids].cuda() / sum_appear)
     entropy *= target_mask
     entropy = torch.nan_to_num(entropy, nan=0.)

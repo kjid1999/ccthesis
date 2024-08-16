@@ -28,7 +28,6 @@ from basic_utils import (
     load_model_emb,
     load_tokenizer
 )
-from diffuseq.importance import get_importance_estimate_model
 
 def create_argparser():
     defaults = dict(model_path='', step=0, out_dir='', top_p=0, rejection_rate=0.0, note='none')

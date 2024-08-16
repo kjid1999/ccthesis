@@ -1,4 +1,4 @@
-CUDA_VISIBLE_DEVICES=0 python -m torch.distributed.launch --nproc_per_node=1 --master_port=12231 --use_env run_train.py \
+CUDA_VISIBLE_DEVICES="0,1" python -m torch.distributed.launch --nproc_per_node=2 --master_port=12231 --use_env run_train.py \
 --diff_steps 2000 \
 --lr 0.0001 \
 --learning_steps 100000 \
@@ -6,7 +6,7 @@ CUDA_VISIBLE_DEVICES=0 python -m torch.distributed.launch --nproc_per_node=1 --m
 --seed 102 \
 --noise_schedule sqrt \
 --hidden_dim 128 \
---bsz 256 \
+--bsz 512 \
 --delay_opt 1 \
 --microbatch 128 \
 --dataset qqp \
