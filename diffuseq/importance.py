@@ -55,11 +55,13 @@ def calculate_mask_rate(importance_score, t, num_timesteps, _lambda=0.5):
 def get_word_freq():
     return torch.load('./word_freq/bert-base-uncased_qqp_nocount_special.pt')
 
+# word_appear = torch.load('./word_freq/bert-base-uncased_qqp.pt')
 word_appear = get_word_freq()
 sum_appear = sum(word_appear)
-
 @torch.no_grad()
 def H(input_ids, target_mask):
+    sen_len = target_mask.sum(dim=-1, keepdim=True)
+    
     entropy = - torch.log(word_appear[input_ids].cuda() / sum_appear)
     entropy *= target_mask
     entropy = torch.nan_to_num(entropy, nan=0.)

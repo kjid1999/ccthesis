@@ -1,8 +1,8 @@
-CUDA_VISIBLE_DEVICES=0 python -u run_decode_solver.py \
---model_dir /home/myDiffuSeq/diffusion_models/diffuseq_qqp_h128_lr0.0001_t2000_sqrt_lossaware_seed102_maxlen98_lambda0_triplet20240612-21:26:42 \
+CUDA_VISIBLE_DEVICES="0,1" python -u run_decode_solver.py \
+--model_dir ./diffusion_models/diffuseq_qqp_h128_lr0.0001_t2000_sqrt_lossaware_seed102_maxlen98_lambda0_triplet_KL_B25620240817-15:54:15 \
 --seed 110 \
---bsz 500 \
---step 20 \
+--bsz 2500 \
+--step 10 \
 --split test \
 --sel_ckpt all \
 --note test

@@ -18,7 +18,7 @@ import torch.nn.functional as F
 
 from .utils.nn import mean_flat
 from .utils.losses import normal_kl, discretized_gaussian_log_likelihood
-from .importance import freq_rank, calculate_mask_rate, get_word_freq#, importance, get_importance_estimate_model, H
+from .importance import freq_rank, calculate_mask_rate, get_word_freq, H#, importance, get_importance_estimate_model, H
 from .KL_approximation import _gaussian_extractor, D_var, D_prod
 
 def triplet_margin_loss(anchor, positive, negative, margin=1):
@@ -567,7 +567,7 @@ class GaussianDiffusion:
         sample_to_feed_into_criterion = []
         dists = []
         freqs = []
-        t1, t2 = 2, self.max_T-2
+        # t1, t2 = 2, self.max_T-2
 
         from tqdm import tqdm
         for T_t, sample in enumerate(tqdm(p_sample_loop_progressive_result, total=self.max_T, position=1, leave=False), start=1):
@@ -781,7 +781,7 @@ class GaussianDiffusion:
         target_mask[(1-input_ids_mask).sum(dim=-1, keepdim=True)] = False
 
         # importance_score = importance(input_ids_x, target_mask, self.importance_estimate_model)
-        # entropy = H(input_ids_x.cpu(), target_mask)
+        entropy = H(input_ids_x.cpu(), target_mask)
         ##################
         
         std = _extract_into_tensor(self.sqrt_one_minus_alphas_cumprod,
@@ -791,7 +791,7 @@ class GaussianDiffusion:
         if noise is None:
             noise = th.randn_like(x_start)
 
-        x_t = self.q_sample(x_start, t, noise=noise, mask=input_ids_mask, mean_embed=model.mean_embed, importance_score=0) # reparametrization trick.
+        x_t = self.q_sample(x_start, t, noise=noise, mask=input_ids_mask, mean_embed=model.mean_embed, importance_score=entropy) # reparametrization trick.
 
         get_logits = model.model.module.get_logits
 
