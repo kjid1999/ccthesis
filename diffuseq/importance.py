@@ -50,7 +50,7 @@ def _S(t, T, _lambda=0.5):
 def calculate_mask_rate(importance_score, t, num_timesteps, _lambda=0.5):
     T = num_timesteps
     t = t[..., None]
-    return 1 - torch.clip(1 - t/T - _S(t, T, _lambda)*importance_score, 0, 1)
+    return 1 - torch.clip(1 - (t/T)**0.5 - _S(t, T, _lambda)*importance_score, 0, 1)
 
 def get_word_freq():
     return torch.load('./word_freq/bert-base-uncased_qqp_nocount_special.pt')
