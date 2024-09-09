@@ -1,6 +1,6 @@
 CUDA_VISIBLE_DEVICES="0" CUDA_LAUNCH_BLOCKING=0 python -m torch.distributed.launch --nproc_per_node=1 --master_port=12231 --use_env run_train.py \
 --diff_steps 2000 \
---lr 0.0001 \
+--lr 0.0003 \
 --learning_steps 70000 \
 --save_interval 10000 \
 --seed 102 \
@@ -18,5 +18,5 @@ CUDA_VISIBLE_DEVICES="0" CUDA_LAUNCH_BLOCKING=0 python -m torch.distributed.laun
 --use_fp16 \
 --denoise_rate 0.5 \
 --schedule_sampler lossaware \
---notes maxlen98_lambda0_triplet_KL_B256_mb128 \
+--notes maxlen98_lambda0_cheaper \
 --_lambda 0.0 \

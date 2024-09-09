@@ -18,7 +18,7 @@ import torch.nn.functional as F
 
 from .utils.nn import mean_flat
 from .utils.losses import normal_kl, discretized_gaussian_log_likelihood
-from .importance import freq_rank, calculate_mask_rate, get_word_freq, H#, importance, get_importance_estimate_model, H
+from .importance import freq_rank, calculate_mask_rate, get_word_freq, H, importance#, get_importance_estimate_model
 from .KL_approximation import _gaussian_extractor, D_var, D_prod
 
 def triplet_margin_loss(anchor, positive, negative, margin=1):
@@ -298,10 +298,18 @@ class GaussianDiffusion:
             # print('mask_rate', mask_rate.shape)
             # print((mask_rate_1-mask_rate).mean())
             # exit()
-            random_mask = mask_rate.bernoulli()[..., None]
-            random_mask = random_mask.expand(x_start.shape)
-            mean_embed_expand = mean_embed[None, None].expand(x_start.shape)
-            x_t = th.where(random_mask==0, x_t, mean_embed_expand)
+            m = 3
+            max_I, min_I = importance_score.max(dim=-1).values, importance_score.min(dim=-1).values
+            interval = max_I - min_I
+            buk = t*m/self.max_T
+            
+            # random_mask = mask_rate.bernoulli()[..., None]
+            # random_mask = random_mask.expand(x_start.shape)
+            # mean_embed_expand = mean_embed[None, None].expand(x_start.shape)
+            # x_t = th.where(random_mask==0, x_t, mean_embed_expand)
+
+            where_mask = (importance_score<(min_I+buk*interval)[..., None])[..., None]
+            x_t = where_mask * mean_embed + ~where_mask * x_t
 
         if mask == None:
             return x_t
@@ -725,10 +733,31 @@ class GaussianDiffusion:
         :param x_start_mean: word embedding
         :return: x_0
         '''
+        def gamma(t, T=self.max_T):
+            return 1 - t/T
+        
+        # x_t is model_out_x_start
         reshaped_x_t = x_t
         logits = get_logits(reshaped_x_t)  # bsz, seqlen, vocab
+
+        non_padding = input_ids != 0
+        target_mask = th.logical_and(mask, non_padding)
+        target_mask[(1-mask).sum(dim=-1, keepdim=True)] = False
+
+        importance_score = importance(mask, target_mask)
+        m = 3
+        max_I, min_I = importance_score.max(dim=-1).values, importance_score.min(dim=-1).values
+        interval = max_I - min_I
+        buk = (t-1)*m/self.max_T
+        where_mask = (importance_score<(min_I+buk*interval)[..., None])
+        masked_input_ids = input_ids + 0
+        me = th.topk(get_logits(self.model.mean_embed), k=1, dim=-1).indices
+        masked_input_ids[where_mask] = me
+
         loss_fct = th.nn.CrossEntropyLoss(reduction='none')
-        decoder_nll = loss_fct(logits.view(-1, logits.size(-1))/temperature, input_ids.view(-1)).view(input_ids.shape)
+        t = t[:, None]
+        decoder_nll = gamma(t)*loss_fct(logits.view(-1, logits.size(-1))/temperature, input_ids.view(-1)).view(input_ids.shape) \
+                + (1-gamma(t))*loss_fct(logits.view(-1, logits.size(-1))/temperature, masked_input_ids.view(-1)).view(input_ids.shape)
         if mask != None:
             decoder_nll *= mask
         if mask != None:
@@ -780,8 +809,8 @@ class GaussianDiffusion:
         target_mask = th.logical_and(input_ids_mask, non_padding)
         target_mask[(1-input_ids_mask).sum(dim=-1, keepdim=True)] = False
 
-        # importance_score = importance(input_ids_x, target_mask, self.importance_estimate_model)
-        entropy = H(input_ids_x.cpu(), target_mask)
+        importance_score = importance(input_ids_x, target_mask)
+        # entropy = H(input_ids_x.cpu(), target_mask)
         ##################
         
         std = _extract_into_tensor(self.sqrt_one_minus_alphas_cumprod,
@@ -791,7 +820,7 @@ class GaussianDiffusion:
         if noise is None:
             noise = th.randn_like(x_start)
 
-        x_t = self.q_sample(x_start, t, noise=noise, mask=input_ids_mask, mean_embed=model.mean_embed, importance_score=entropy) # reparametrization trick.
+        x_t = self.q_sample(x_start, t, noise=noise, mask=input_ids_mask, mean_embed=model.mean_embed, importance_score=importance_score) # reparametrization trick.
 
         get_logits = model.model.module.get_logits
 
@@ -808,47 +837,49 @@ class GaussianDiffusion:
         terms["mse"] = th.where(t0_mask, t0_loss, terms["mse"])
 
         # I modified, add contrastive loss
-        embedding_weight = model.model.module.word_embedding.weight[self.argsort_idx]
-        rand_ga = th.randint(1, len(embedding_weight), size=(1,))[0]
-        anchor = model.mean_embed.detach()
-        pos = embedding_weight[:rand_ga]
-        neg = embedding_weight[rand_ga:]
-        terms["triplet"] = triplet_margin_loss(anchor, pos, neg, margin=1e-4)
-        terms["emb norm"] = (embedding_weight - anchor[None]).norm(dim=-1).mean()
+        # embedding_weight = model.model.module.word_embedding.weight[self.argsort_idx]
+        # rand_ga = th.randint(1, len(embedding_weight), size=(1,))[0]
+        # anchor = model.mean_embed.detach()
+        # pos = embedding_weight[:rand_ga]
+        # neg = embedding_weight[rand_ga:]
+        # terms["triplet"] = triplet_margin_loss(anchor, pos, neg, margin=1e-4)
+        # terms["emb norm"] = (embedding_weight - anchor[None]).norm(dim=-1).mean()
 
         # I modified, add KL approx regurization
-        posterior_mean, posterior_variance, log_posterior_variance = self.q_posterior_mean_variance(x_start, x_t, t)
-        reverse_mean, reverse_variance, log_reverse_variance = self.q_posterior_mean_variance(model_out_x_start, x_t, t)
-        q_mean = th.stack([model.mean_embed[None, None].expand(posterior_mean.shape), posterior_mean], dim=-2)
-        p_mean = th.stack([model.mean_embed[None, None].expand(reverse_mean.shape), reverse_mean], dim=-2)
-        small_var_shape = posterior_variance[:, :, 0].shape
-        small_var = th.full(small_var_shape, 1e-8, device=posterior_variance.device)
-        log_small_var = th.log(small_var)
-        q_var = th.stack([small_var, posterior_variance[:, :, 0]], dim=-1)
-        p_var = th.stack([small_var, reverse_variance[:, :, 0]], dim=-1)
-        q_log_var = th.stack([log_small_var, log_posterior_variance[:, :, 0]], dim=-1)
-        p_log_var = th.stack([log_small_var, log_reverse_variance[:, :, 0]], dim=-1)
-        b = t / self.max_T
-        q_weight = th.stack([b, 1-b], dim=-1)[:, None].expand(q_var.shape)
-        p_weight = q_weight
-        q = _gaussian_extractor(q_mean, q_var, q_weight, q_log_var)
-        p = _gaussian_extractor(p_mean, p_var, p_weight, p_log_var)
-        error_threshold = 1e-2
-        d_prod = D_prod(q, p)
-        d_var = D_var(q, p)
-        approx_active = (d_var - d_prod) < error_threshold
-        d_mean = ((d_var + d_prod)/2) * approx_active
-        terms["d_mean"] = d_mean.mean(dim=1).squeeze()
-        terms["d_act"] = approx_active.float().mean()
+        # posterior_mean, posterior_variance, log_posterior_variance = self.q_posterior_mean_variance(x_start, x_t, t)
+        # reverse_mean, reverse_variance, log_reverse_variance = self.q_posterior_mean_variance(model_out_x_start, x_t, t)
+        # q_mean = th.stack([model.mean_embed[None, None].expand(posterior_mean.shape), posterior_mean], dim=-2)
+        # p_mean = th.stack([model.mean_embed[None, None].expand(reverse_mean.shape), reverse_mean], dim=-2)
+        # small_var_shape = posterior_variance[:, :, 0].shape
+        # small_var = th.full(small_var_shape, 1e-8, device=posterior_variance.device)
+        # log_small_var = th.log(small_var)
+        # q_var = th.stack([small_var, posterior_variance[:, :, 0]], dim=-1)
+        # p_var = th.stack([small_var, reverse_variance[:, :, 0]], dim=-1)
+        # q_log_var = th.stack([log_small_var, log_posterior_variance[:, :, 0]], dim=-1)
+        # p_log_var = th.stack([log_small_var, log_reverse_variance[:, :, 0]], dim=-1)
+        # b = t / self.max_T
+        # q_weight = th.stack([b, 1-b], dim=-1)[:, None].expand(q_var.shape)
+        # p_weight = q_weight
+        # q = _gaussian_extractor(q_mean, q_var, q_weight, q_log_var)
+        # p = _gaussian_extractor(p_mean, p_var, p_weight, p_log_var)
+        # error_threshold = 1e-2
+        # d_prod = D_prod(q, p)
+        # d_var = D_var(q, p)
+        # approx_active = (d_var - d_prod) < error_threshold
+        # d_mean = ((d_var + d_prod)/2) * approx_active
+        # terms["d_mean"] = d_mean.mean(dim=1).squeeze()
+        # terms["d_act"] = approx_active.float().mean()
 
         out_mean, _, _ = self.q_mean_variance(x_start, th.LongTensor([self.num_timesteps - 1]).to(x_start.device))
         tT_loss =  mean_flat(out_mean ** 2)
 
-        decoder_nll = self._token_discrete_loss(x_start, get_logits, input_ids_x, temperature=1) # embedding regularization
-        terms["nll"] = self._token_discrete_loss(model_out_x_start, get_logits, input_ids_x, mask=input_ids_mask, truncate=True, t=t) # x_0->model_out_x_start
+        decoder_nll = self._token_discrete_loss(model_out_x_start, get_logits, input_ids_x, temperature=1, t=t, mask=input_ids_mask) # embedding regularization
+        # decoder_nll = self._token_discrete_loss(x_start, get_logits, input_ids_x, temperature=1, t=t) # embedding regularization
+        # terms["nll"] = self._token_discrete_loss(model_out_x_start, get_logits, input_ids_x, mask=input_ids_mask, truncate=True, t=t) # x_0->model_out_x_start
 
-        terms["loss"] = terms["mse"] + decoder_nll + tT_loss + terms["triplet"] + 1e-2*terms["emb norm"] + terms["d_mean"]
+        # terms["loss"] = terms["mse"] + decoder_nll + tT_loss + terms["triplet"] + 1e-2*terms["emb norm"] + terms["d_mean"]
         # terms["loss"] = terms["mse"] + decoder_nll + tT_loss + terms["d_mean"]
+        terms["loss"] = decoder_nll + tT_loss
         # terms["loss"] = terms["mse"] + decoder_nll + tT_loss
 
         if model.mean_embed is not None:

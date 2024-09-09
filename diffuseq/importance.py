@@ -1,6 +1,7 @@
 import torch
 from transformers import BertTokenizer, BertModel
 from diffuseq.utils import dist_util
+from collections import Counter
 
 def _get_attention_map(attention_weights):
     '''
@@ -13,25 +14,14 @@ def _get_attention_map(attention_weights):
     return attention_map
 
 @torch.no_grad()
-def importance(input_ids, atten_mask, model, normalize=True):
+def importance(input_ids, target_mask):
     '''
-    input_ids: input sentences token index, (B, T, D)
-    model: BERT to calculate attention score
+    input_ids: input sentences token index, (B, T)
     '''
-    model.config.output_attentions = True
-    outputs = model(input_ids, atten_mask)
-    attention_weights = outputs.attentions
-    # print(input_ids.shape)
-    # print(atten_mask.shape)
-
-    attention_map = _get_attention_map(attention_weights)
-
-    importance_score = attention_map[:, :, :, :, :].mean(dim=(0, 2, -2))
-
-    if normalize:
-        return importance_score - importance_score.mean(dim=-1, keepdim=True)
-    else:
-        return importance_score
+    tf_idf_w = tf_idf(input_ids, target_mask) 
+    H_w = H(input_ids, target_mask)
+    ret = tf_idf_w/tf_idf_w.sum(dim=-1)[..., None] + H_w/H_w.sum(dim=-1)[..., None]
+    return torch.nan_to_num(ret, nan=0.)
 
 def get_importance_estimate_model():
     '''
@@ -53,7 +43,7 @@ def calculate_mask_rate(importance_score, t, num_timesteps, _lambda=0.5):
     return 1 - torch.clip(1 - t/T - _S(t, T, _lambda)*importance_score, 0, 1)
 
 def get_word_freq():
-    return torch.load('./word_freq/bert-base-uncased_qqp_nocount_special.pt')
+    return torch.load('./word_freq/bert-base-uncased_qqp_nocount_special.pt', map_location='cuda')
 
 # word_appear = torch.load('./word_freq/bert-base-uncased_qqp.pt')
 word_appear = get_word_freq()
@@ -62,11 +52,34 @@ sum_appear = sum(word_appear)
 def H(input_ids, target_mask):
     sen_len = target_mask.sum(dim=-1, keepdim=True)
     
-    entropy = - torch.log(word_appear[input_ids].cuda() / sum_appear)
+    p = word_appear[input_ids].cuda() / sum_appear
+    entropy = - p * torch.log(p)
     entropy *= target_mask
     entropy = torch.nan_to_num(entropy, nan=0.)
 
-    ret = 1 - entropy.sum(dim=-1, keepdim=True) / (sen_len * entropy)
+    # ret = entropy.sum(dim=-1, keepdim=True) / (sen_len * entropy)
+    # ret = torch.nan_to_num(ret, nan=0.)
+    return target_mask * entropy
+
+
+num_sen_word_appear = torch.load('./word_freq/bert-base-uncased_qqp_tf.pt', map_location='cuda')
+@torch.no_grad()
+def tf_idf(input_ids, target_mask):
+    '''
+    input_ids: B x L
+    '''
+    # sen_len = target_mask.sum(dim=-1, keepdim=True)
+    l = []
+
+    # exit()
+    for d in input_ids.cpu():
+        # c = Counter(d)
+        keys, values = torch.unique(d, sorted=False, return_counts=True)
+        h = dict([(k.item(), v) for k, v in zip(keys, values)])
+        l.append(d.apply_(h.get))
+    f = torch.stack(l).cuda() * target_mask
+    N = 144715
+    ret = f / f.sum(dim=-1)[:, None] * torch.log(N / (1 + num_sen_word_appear[input_ids]))
     ret = torch.nan_to_num(ret, nan=0.)
     return target_mask * ret
 

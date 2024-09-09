@@ -37,9 +37,28 @@ def calculate_entropy():
         print(i)
     # torch.save(word_freq, f'./word_freq/bert-base-uncased_qqp.pt')
 
+def calculate_tf():
+    tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
+    f = open('/home/DiffuSeq/datasets/QQP/train.jsonl')
+    train_data = pd.read_json(path_or_buf=f, lines=True)
+    print(train_data)
+
+    word_freq = torch.zeros((tokenizer.vocab_size,), dtype=torch.int64)
+
+    for data in tqdm(train_data['trg']):
+        iids = set(tokenizer(data)['input_ids'])
+        for iid in iids:
+            word_freq[iid] += 1
+
+    if not os.path.exists('./word_freq'):
+        os.mkdir('word_freq')
+    torch.save(word_freq, f'./word_freq/bert-base-uncased_qqp_tf.pt')
+
+
 if __name__ == '__main__':
-    word_freq = torch.load(f'../word_freq/bert-base-uncased_qqp.pt')
-    print(sum(word_freq))
+    calculate_tf()
+    # word_freq = torch.load(f'../word_freq/bert-base-uncased_qqp.pt')
+    # print(sum(word_freq))
 
 
 
