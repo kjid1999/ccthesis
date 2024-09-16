@@ -20,6 +20,9 @@ Arguments explanation:
 - ```--use_fp16```: set whether to use mixed precision training
 - ```--denoise_rate```: set the denoise rate, with 0.5 as the default, no effect in this version
 
+## Model Weight
+We provide our training weight on [Google Drive](https://drive.google.com/drive/folders/1JgwzrrOeA0uNF-03Tii041GJOKE9s2Ue?usp=sharing).
+
 ## Decoding
 Perform full 2000 steps diffusion process. Achieve higher performance compare with Speed-up Decoding
 ```bash
